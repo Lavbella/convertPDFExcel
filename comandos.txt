@@ -1,0 +1,12 @@
+python -m venv venv   
+pip install --upgrade pip
+python.exe -m pip install --upgrade pip
+pip install streamlit pdfplumber pandas xlsxwriter
+
+streamlit run app.py    
+
+.\venv\Scripts\activate
+deactivate    
+.\venv\Scripts\pyinstaller run_app.spec --clean
+ou
+pyinstaller run_app.spec --clean
