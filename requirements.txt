@@ -2,3 +2,7 @@ streamlit
 pdfplumber
 pandas
 xlsxwriter
+camelot-py==0.11.0
+tabula-py 
+pdf2image 
+pytesseract

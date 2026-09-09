@@ -1,93 +1,350 @@
 import streamlit as st
-import pdfplumber
 import pandas as pd
+import pdfplumber
+import camelot
+import tabula
+import tempfile
 import io
 
-# Configuração inicial da página Streamlit
-st.set_page_config(page_title="Conversor PDF para Excel", page_icon="📊", layout="centered")
+from pdf2image import convert_from_path
+import pytesseract
 
-st.title("📊 Conversor de PDF para Excel")
-st.write("Insira um ficheiro PDF (originalmente gerado a partir de um Excel) para recuperar as tabelas.")
+pytesseract.pytesseract.tesseract_cmd = (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+)
 
-# Upload do ficheiro PDF
-uploaded_file = st.file_uploader("Escolha o ficheiro PDF", type=["pdf"])
+st.set_page_config(
+    page_title="PDF para Excel",
+    page_icon="📊"
+)
 
-if uploaded_file is not None:
-    st.success("Ficheiro carregado com sucesso!")
-    
-    # Botão para iniciar o processamento
-    if st.button("Processar e Extrair Dados"):
-        with st.spinner("A extrair dados do PDF..."):
-            all_tables = []
-            
-            # Abrir o PDF diretamente da memória
-            with pdfplumber.open(uploaded_file) as pdf:
-                headers = None  # Guardará o cabeçalho definitivo da primeira página
-                
-                for i, page in enumerate(pdf.pages):
-                    tables = page.extract_tables()
-                    for table in tables:
-                        if not table:
-                            continue
-                        
-                        # Se for a PRIMEIRA página, extraímos o cabeçalho
-                        if headers is None:
-                            # Tratar cabeçalhos vazios ou nulos da primeira linha
-                            raw_header = [str(cell).strip() if cell else "" for cell in table[0]]
-                            
-                            # Garantir que todos os nomes são únicos para o Pandas não falhar
-                            headers = []
-                            for idx, name in enumerate(raw_header):
-                                if name == "" or name in headers:
-                                    headers.append(f"{name or 'Coluna'}_{idx}")
-                                else:
-                                    headers.append(name)
-                            
-                            # O resto da tabela são os dados desta primeira página
-                            dados_pagina = table[1:]
-                        else:
-                            # Nas páginas seguintes, se a primeira linha for igual ao cabeçalho original, ignoramos
-                            primeira_linha = [str(cell).strip() if cell else "" for cell in table[0]]
-                            
-                            # Se a primeira linha parecer um cabeçalho repetido, saltamos
-                            if primeira_linha == raw_header or any(elem in primeira_linha for elem in raw_header if elem != ""):
-                                dados_pagina = table[1:]
-                            else:
-                                dados_pagina = table  # Caso contrário, já são dados puros
-                        
-                        # Criar o DataFrame com os dados da página e as colunas fixas
-                        if dados_pagina:
-                            df = pd.DataFrame(dados_pagina, columns=headers)
-                            all_tables.append(df)
+st.title("📊 Conversor Universal PDF → Excel")
 
-            
-            if all_tables:
-                # Combinar todas as tabelas encontradas num único DataFrame ou processar por abas
-                # Para este exemplo simples, vamos concatenar verticalmente
-                final_df = pd.concat(all_tables, ignore_index=True)
+uploaded_file = st.file_uploader(
+    "Escolha um PDF",
+    type=["pdf"]
+)
 
-                # 🔥 NOVA LINHA: Calcular o total de registos reais extraídos
-                total_linhas = len(final_df)
-                
-                st.subheader("Visualização dos Dados Extraídos")
-                st.metric(label="Total de Linhas Recuperadas (sem cabeçalho)", value=f"{total_linhas} linhas")
-                # st.dataframe(final_df.head(10))
-                st.dataframe(final_df, height=500)  # Mostra todas as linhas numa caixa com scroll de 500 píxeis
-                # Criar um buffer em memória para guardar o ficheiro Excel
+###########################################################################
+# UTILIDADES
+###########################################################################
+
+def clean_dataframe(df):
+
+    df = df.fillna("")
+
+    # remover linhas totalmente vazias
+    df = df[
+        ~(df.astype(str)
+            .apply(
+                lambda x: ''.join(x).strip(),
+                axis=1
+            ) == "")
+    ]
+
+    return df
+
+
+###########################################################################
+# CAMELOT
+###########################################################################
+
+def extract_with_camelot(pdf_path):
+
+    tables = camelot.read_pdf(
+        pdf_path,
+        pages="all",
+        flavor="stream"
+    )
+
+    dfs = []
+
+    for table in tables:
+
+        df = table.df
+
+        df = clean_dataframe(df)
+
+        if not df.empty:
+            dfs.append(df)
+
+    return dfs
+
+
+###########################################################################
+# TABULA
+###########################################################################
+
+def extract_with_tabula(pdf_path):
+
+    tables = tabula.read_pdf(
+        pdf_path,
+        pages="all",
+        multiple_tables=True
+    )
+
+    dfs = []
+
+    for table in tables:
+
+        if table is not None and not table.empty:
+
+            table = clean_dataframe(table)
+
+            dfs.append(table)
+
+    return dfs
+
+
+###########################################################################
+# PDFPLUMBER
+###########################################################################
+
+def extract_with_pdfplumber(pdf_path):
+
+    dfs = []
+
+    with pdfplumber.open(pdf_path) as pdf:
+
+        for page in pdf.pages:
+
+            tables = page.extract_tables()
+
+            for table in tables:
+
+                if not table:
+                    continue
+
+                max_cols = max(len(row) for row in table if row)
+
+                rows = []
+
+                for row in table:
+
+                    if row:
+
+                        row = [
+                            str(cell).strip()
+                            if cell else ""
+                            for cell in row
+                        ]
+
+                        row += [""] * (max_cols - len(row))
+
+                        rows.append(row)
+
+                if rows:
+
+                    headers = [
+                        f"Coluna_{i+1}"
+                        for i in range(max_cols)
+                    ]
+
+                    df = pd.DataFrame(
+                        rows,
+                        columns=headers
+                    )
+
+                    df = clean_dataframe(df)
+
+                    dfs.append(df)
+
+    return dfs
+
+
+###########################################################################
+# OCR
+###########################################################################
+
+def extract_with_ocr(pdf_path):
+
+    pages = convert_from_path(pdf_path)
+
+    data = []
+
+    for page in pages:
+
+        text = pytesseract.image_to_string(
+            page,
+            lang="por"
+        )
+
+        lines = text.split("\n")
+
+        for line in lines:
+
+            line = line.strip()
+
+            if line:
+                data.append([line])
+
+    if not data:
+        return []
+
+    df = pd.DataFrame(
+        data,
+        columns=["Texto"]
+    )
+
+    return [df]
+
+
+###########################################################################
+# PROCESSAMENTO
+###########################################################################
+
+if uploaded_file:
+
+    if st.button("Converter"):
+
+        with st.spinner("A processar PDF..."):
+
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=".pdf"
+            ) as tmp:
+
+                tmp.write(uploaded_file.read())
+
+                pdf_path = tmp.name
+
+            tables = []
+
+            ################################################################
+            # 1. CAMELOT
+            ################################################################
+
+            try:
+
+                st.info("A tentar Camelot...")
+
+                tables = extract_with_camelot(pdf_path)
+
+                if tables:
+                    st.success(
+                        f"Camelot encontrou {len(tables)} tabela(s)"
+                    )
+
+            except Exception as e:
+
+                st.warning(f"Camelot falhou: {e}")
+
+            ################################################################
+            # 2. TABULA
+            ################################################################
+
+            if not tables:
+
+                try:
+
+                    st.info("A tentar Tabula...")
+
+                    tables = extract_with_tabula(pdf_path)
+
+                    if tables:
+                        st.success(
+                            f"Tabula encontrou {len(tables)} tabela(s)"
+                        )
+
+                except Exception as e:
+
+                    st.warning(f"Tabula falhou: {e}")
+
+            ################################################################
+            # 3. PDFPLUMBER
+            ################################################################
+
+            if not tables:
+
+                try:
+
+                    st.info("A tentar pdfplumber...")
+
+                    tables = extract_with_pdfplumber(pdf_path)
+
+                    if tables:
+                        st.success(
+                            f"pdfplumber encontrou {len(tables)} tabela(s)"
+                        )
+
+                except Exception as e:
+
+                    st.warning(
+                        f"pdfplumber falhou: {e}"
+                    )
+
+            ################################################################
+            # 4. OCR
+            ################################################################
+
+            if not tables:
+
+                try:
+
+                    st.info("A tentar OCR...")
+
+                    tables = extract_with_ocr(pdf_path)
+
+                    if tables:
+                        st.success(
+                            "OCR executado com sucesso"
+                        )
+
+                except Exception as e:
+
+                    st.warning(f"OCR falhou: {e}")
+
+            ################################################################
+            # RESULTADO
+            ################################################################
+
+            if tables:
+
                 output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    final_df.to_excel(writer, index=False, sheet_name='Dados Extraídos')
-                
-                # Preparar os dados binários para o botão de download
+
+                with pd.ExcelWriter(
+                    output,
+                    engine="xlsxwriter"
+                ) as writer:
+
+                    for idx, df in enumerate(
+                        tables,
+                        start=1
+                    ):
+
+                        nome_folha = f"Tabela_{idx}"
+
+                        df.to_excel(
+                            writer,
+                            sheet_name=nome_folha[:31],
+                            index=False
+                        )
+
                 excel_data = output.getvalue()
-                
-                st.write("---")
-                # Botão para o utilizador descarregar o ficheiro convertido
+
+                st.success(
+                    f"Extraídas {len(tables)} tabelas."
+                )
+
+                for i, df in enumerate(tables):
+
+                    st.subheader(
+                        f"Tabela {i+1}"
+                    )
+
+                    st.dataframe(
+                        df.head(20)
+                    )
+
                 st.download_button(
-                    label="📥 Descarregar Ficheiro Excel",
+                    "📥 Descarregar Excel",
                     data=excel_data,
                     file_name="pdf_convertido.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+
             else:
-                st.error("Não foram encontradas tabelas estruturadas neste PDF. Verifique se o PDF é nativo e não uma imagem digitalizada.")
+
+                st.error(
+                    "Não foi possível extrair dados do PDF."
+                )
